@@ -9,6 +9,11 @@ export interface Landmark {
   visibility?: number;
 }
 
+export interface PoseEngineResult {
+  landmarks: Landmark[] | null;
+  worldLandmarks: Landmark[] | null;
+}
+
 export type ExerciseType = 'squat' | 'pushup';
 export type CameraView = 'lateral' | 'frontal' | 'diagonal';
 
@@ -18,7 +23,7 @@ export interface PoseEngine {
   detect: (
     image: HTMLVideoElement | HTMLCanvasElement,
     timestampMs: number
-  ) => Promise<Landmark[] | null>;
+  ) => Promise<PoseEngineResult | null>;
   destroy: () => void;
   isReady: () => boolean;
 }
@@ -29,13 +34,16 @@ export interface AngleDefinition {
   id: string;
   name: string;
   description?: string;
-  type: 'joint_3pt' | 'vertical_inclination';
+  type: 'joint_3pt' | 'vertical_inclination' | 'signed_hip_deviation';
   // 3 landmark indices: [a, b, c] where b is vertex (e.g., [hip, knee, ankle])
   leftLandmarks?: [number, number, number];
   rightLandmarks?: [number, number, number];
   // for vertical inclination: [shoulder, hip]
   leftVertical?: [number, number];
   rightVertical?: [number, number];
+  // for signed hip deviation: [shoulder, hip, ankle]
+  leftHipDeviation?: [number, number, number];
+  rightHipDeviation?: [number, number, number];
   idealRange?: [number, number];
   unit?: string;
 }
@@ -44,7 +52,6 @@ export interface PhaseDefinition {
   id: string;
   name: string;
   color: string;
-  // Trigger condition to enter or identify this phase
   condition: {
     angleId: string;
     operator: ComparisonOperator;
@@ -57,9 +64,8 @@ export interface FormRule {
   name: string;
   message: string;
   severity: 'warning' | 'error';
-  // When should this rule be evaluated?
-  // 'bottom' (only evaluated at lowest depth), 'all' (evaluated every frame during movement)
   triggerPhase?: string;
+  minViolationFrames?: number; // Flag rule only if violated for at least N consecutive frames
   condition: {
     angleId: string;
     operator: ComparisonOperator;
@@ -75,9 +81,13 @@ export interface ExerciseConfig {
   primaryAngleId: string;
   angles: AngleDefinition[];
   phases: PhaseDefinition[];
-  cyclePhases: string[]; // sequence e.g. ['standing', 'descending', 'bottom', 'ascending']
+  cyclePhases: string[];
   bottomPhaseId: string;
   topPhaseId: string;
+  descendingPhaseId: string;
+  ascendingPhaseId: string;
+  reboundAngle: number;
+  minRomAngle: number;
   rules: FormRule[];
 }
 
@@ -103,9 +113,11 @@ export interface RepResult {
 
 export interface FrameData {
   frameIndex: number;
-  timestampMs: number;
-  keypoints: Landmark[];
-  angles: Record<string, number | null>;
+  mediaTimeMs: number;
+  landmarks: Landmark[];
+  worldLandmarks: Landmark[] | null;
+  rawAngles: Record<string, number | null>;
+  smoothedAngles: Record<string, number | null>;
   phase: string;
   inferenceTimeMs: number;
 }
@@ -119,14 +131,27 @@ export interface SessionMetrics {
   avgFps: number;
   avgInferenceTimeMs: number;
   sessionDurationSec: number;
+  totalFrames: number;
+}
+
+export interface SessionExportHeader {
+  app: string;
+  version: string;
+  modelName: string;
+  exercise: ExerciseType | string;
+  cameraView: CameraView;
+  videoFileName: string | null;
+  videoWidth: number;
+  videoHeight: number;
+  fps: number;
+  avgFps: number;
+  avgInferenceTimeMs: number;
+  totalFrames: number;
+  exportedAt: string;
 }
 
 export interface SessionExportData {
-  app: string;
-  version: string;
-  exercise: ExerciseType | string;
-  cameraView: CameraView;
-  exportedAt: string;
+  header: SessionExportHeader;
   metrics: SessionMetrics;
   reps: RepResult[];
   frames: FrameData[];

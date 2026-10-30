@@ -1,14 +1,15 @@
 /**
  * MediaPipe Pose Landmarker Engine
  * Implements standard PoseEngine interface for modular, pluggable architecture.
+ * Loads the local model from /models/pose_landmarker_lite.task with pinned CDN WASM.
  */
 
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
-import { Landmark, PoseEngine } from '../types/pose';
+import { Landmark, PoseEngine, PoseEngineResult } from '../types/pose';
 
-const WASM_CDN_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
-const MODEL_ASSET_URL =
-  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+// Pinned to installed @mediapipe/tasks-vision version 1.2.0
+const WASM_CDN_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.0/wasm';
+const MODEL_ASSET_PATH = '/models/pose_landmarker_lite.task';
 
 export class MediaPipePoseEngine implements PoseEngine {
   readonly name = 'MediaPipe PoseLandmarker Lite';
@@ -25,12 +26,11 @@ export class MediaPipePoseEngine implements PoseEngine {
     try {
       const vision = await FilesetResolver.forVisionTasks(WASM_CDN_URL);
 
-      // Try GPU delegate first for maximum FPS
-      try {
-        this.landmarker = await PoseLandmarker.createFromOptions(vision, {
+      const createLandmarker = async (delegate: 'GPU' | 'CPU') => {
+        return await PoseLandmarker.createFromOptions(vision, {
           baseOptions: {
-            modelAssetPath: MODEL_ASSET_URL,
-            delegate: 'GPU',
+            modelAssetPath: MODEL_ASSET_PATH,
+            delegate,
           },
           runningMode: 'VIDEO',
           numPoses: 1,
@@ -38,19 +38,14 @@ export class MediaPipePoseEngine implements PoseEngine {
           minPosePresenceConfidence: 0.5,
           minTrackingConfidence: 0.5,
         });
+      };
+
+      // Try GPU delegate first for maximum performance, fallback to CPU
+      try {
+        this.landmarker = await createLandmarker('GPU');
       } catch (gpuError) {
         console.warn('GPU delegate failed, falling back to CPU delegate:', gpuError);
-        this.landmarker = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: MODEL_ASSET_URL,
-            delegate: 'CPU',
-          },
-          runningMode: 'VIDEO',
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.5,
-          minPosePresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
+        this.landmarker = await createLandmarker('CPU');
       }
 
       this.ready = true;
@@ -65,20 +60,24 @@ export class MediaPipePoseEngine implements PoseEngine {
   async detect(
     image: HTMLVideoElement | HTMLCanvasElement,
     timestampMs: number
-  ): Promise<Landmark[] | null> {
+  ): Promise<PoseEngineResult | null> {
     if (!this.ready || !this.landmarker) {
       return null;
     }
 
     try {
-      // detectForVideo requires strictly monotonically increasing timestamp
       const result = this.landmarker.detectForVideo(image, Math.round(timestampMs));
       if (result && result.landmarks && result.landmarks.length > 0) {
-        return result.landmarks[0] as Landmark[];
+        return {
+          landmarks: result.landmarks[0] as Landmark[],
+          worldLandmarks:
+            result.worldLandmarks && result.worldLandmarks.length > 0
+              ? (result.worldLandmarks[0] as Landmark[])
+              : null,
+        };
       }
       return null;
     } catch (err) {
-      // In case of slight timestamp irregularities or frame drops
       console.debug('MediaPipe frame detection error:', err);
       return null;
     }

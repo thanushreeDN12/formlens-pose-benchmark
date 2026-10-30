@@ -12,6 +12,7 @@ import {
 import {
   calculateAngle,
   calculateTorsoInclination,
+  calculateSignedHipDeviation,
   getDominantSide,
 } from '../utils/angles';
 
@@ -29,6 +30,7 @@ export interface RuleEvaluationResult {
 export class RuleEngine {
   private config: ExerciseConfig;
   private primaryAngleHistory: number[] = [];
+  private consecutiveViolationCounts = new Map<string, number>();
 
   constructor(config: ExerciseConfig) {
     this.config = config;
@@ -37,6 +39,7 @@ export class RuleEngine {
   setConfig(config: ExerciseConfig) {
     this.config = config;
     this.primaryAngleHistory = [];
+    this.consecutiveViolationCounts.clear();
   }
 
   getConfig(): ExerciseConfig {
@@ -45,13 +48,17 @@ export class RuleEngine {
 
   /**
    * Computes all defined angles in config for the given frame landmarks.
+   * Scales normalized coordinates by actual video pixel dimensions (width/height).
    */
-  computeAngles(landmarks: Landmark[]): {
+  computeAngles(
+    landmarks: Landmark[],
+    width = 1,
+    height = 1
+  ): {
     angles: Record<string, number | null>;
     dominantSide: 'left' | 'right';
   } {
     const dominantSide = getDominantSide(landmarks);
-    const otherSide = dominantSide === 'left' ? 'right' : 'left';
     const angles: Record<string, number | null> = {};
 
     for (const def of this.config.angles) {
@@ -64,15 +71,18 @@ export class RuleEngine {
           computed = calculateAngle(
             landmarks[domLms[0]],
             landmarks[domLms[1]],
-            landmarks[domLms[2]]
+            landmarks[domLms[2]],
+            width,
+            height
           );
         }
-        // Fallback to alternative side if dominant side landmarks are occluded
         if (computed === null && altLms) {
           computed = calculateAngle(
             landmarks[altLms[0]],
             landmarks[altLms[1]],
-            landmarks[altLms[2]]
+            landmarks[altLms[2]],
+            width,
+            height
           );
         }
         angles[def.id] = computed;
@@ -84,13 +94,41 @@ export class RuleEngine {
         if (domPair) {
           computed = calculateTorsoInclination(
             landmarks[domPair[0]],
-            landmarks[domPair[1]]
+            landmarks[domPair[1]],
+            width,
+            height
           );
         }
         if (computed === null && altPair) {
           computed = calculateTorsoInclination(
             landmarks[altPair[0]],
-            landmarks[altPair[1]]
+            landmarks[altPair[1]],
+            width,
+            height
+          );
+        }
+        angles[def.id] = computed;
+      } else if (def.type === 'signed_hip_deviation') {
+        const domTriplet = dominantSide === 'left' ? def.leftHipDeviation : def.rightHipDeviation;
+        const altTriplet = dominantSide === 'left' ? def.rightHipDeviation : def.leftHipDeviation;
+
+        let computed: number | null = null;
+        if (domTriplet) {
+          computed = calculateSignedHipDeviation(
+            landmarks[domTriplet[0]],
+            landmarks[domTriplet[1]],
+            landmarks[domTriplet[2]],
+            width,
+            height
+          );
+        }
+        if (computed === null && altTriplet) {
+          computed = calculateSignedHipDeviation(
+            landmarks[altTriplet[0]],
+            landmarks[altTriplet[1]],
+            landmarks[altTriplet[2]],
+            width,
+            height
           );
         }
         angles[def.id] = computed;
@@ -102,6 +140,7 @@ export class RuleEngine {
 
   /**
    * Determines the exercise phase based on angles and movement trajectory.
+   * Completely config-driven without hardcoded phase string literals.
    */
   determinePhase(
     angles: Record<string, number | null>,
@@ -128,17 +167,17 @@ export class RuleEngine {
       this.primaryAngleHistory.shift();
     }
 
-    // Estimate direction: delta between newest and oldest in recent frames
     const first = this.primaryAngleHistory[0];
     const isDecreasing = primaryAngle < first - 2;
     const isIncreasing = primaryAngle > first + 2;
 
     const topPhase = phases.find((p) => p.id === this.config.topPhaseId) || phases[0];
     const bottomPhase = phases.find((p) => p.id === this.config.bottomPhaseId) || phases[2];
-    const descendingPhase = phases.find((p) => p.id === 'descending') || phases[1];
-    const ascendingPhase = phases.find((p) => p.id === 'ascending') || phases[3];
+    const descendingPhase =
+      phases.find((p) => p.id === this.config.descendingPhaseId) || phases[1];
+    const ascendingPhase =
+      phases.find((p) => p.id === this.config.ascendingPhaseId) || phases[3];
 
-    // Thresholds
     const topThreshold = topPhase.condition.threshold;
     const bottomThreshold = bottomPhase.condition.threshold;
 
@@ -150,12 +189,19 @@ export class RuleEngine {
       return bottomPhase;
     }
 
-    // Intermediate zone: between bottom and top threshold
-    if (previousPhaseId === bottomPhase.id || previousPhaseId === ascendingPhase.id || isIncreasing) {
+    if (
+      previousPhaseId === bottomPhase.id ||
+      previousPhaseId === ascendingPhase.id ||
+      isIncreasing
+    ) {
       return ascendingPhase;
     }
 
-    if (previousPhaseId === topPhase.id || previousPhaseId === descendingPhase.id || isDecreasing) {
+    if (
+      previousPhaseId === topPhase.id ||
+      previousPhaseId === descendingPhase.id ||
+      isDecreasing
+    ) {
       return descendingPhase;
     }
 
@@ -164,6 +210,8 @@ export class RuleEngine {
 
   /**
    * Evaluates active rules and produces immediate real-time feedback.
+   * Enforces violation persistence: flags a violation ONLY if it persists
+   * for at least minViolationFrames consecutive frames (default 5).
    */
   evaluateRules(
     angles: Record<string, number | null>,
@@ -179,38 +227,54 @@ export class RuleEngine {
     const activeViolations: FormRule[] = [];
 
     for (const rule of this.config.rules) {
-      // Skip bottom-only requirement rules during live frames unless at bottom or descending
       if (rule.triggerPhase === 'bottom_requirement') {
         continue;
       }
 
-      if (rule.triggerPhase && rule.triggerPhase !== 'all' && rule.triggerPhase !== currentPhase.id) {
+      if (
+        rule.triggerPhase &&
+        rule.triggerPhase !== 'all' &&
+        rule.triggerPhase !== currentPhase.id
+      ) {
+        this.consecutiveViolationCounts.set(rule.id, 0);
         continue;
       }
 
       const angleVal = angles[rule.condition.angleId];
-      if (angleVal === null || angleVal === undefined) continue;
+      if (angleVal === null || angleVal === undefined) {
+        this.consecutiveViolationCounts.set(rule.id, 0);
+        continue;
+      }
 
-      let isViolated = false;
+      let isViolatedOnThisFrame = false;
       const { operator, threshold } = rule.condition;
 
       switch (operator) {
         case '>':
-          isViolated = angleVal > threshold;
+          isViolatedOnThisFrame = angleVal > threshold;
           break;
         case '>=':
-          isViolated = angleVal >= threshold;
+          isViolatedOnThisFrame = angleVal >= threshold;
           break;
         case '<':
-          isViolated = angleVal < threshold;
+          isViolatedOnThisFrame = angleVal < threshold;
           break;
         case '<=':
-          isViolated = angleVal <= threshold;
+          isViolatedOnThisFrame = angleVal <= threshold;
           break;
       }
 
-      if (isViolated) {
-        activeViolations.push(rule);
+      const currentCount = this.consecutiveViolationCounts.get(rule.id) || 0;
+      if (isViolatedOnThisFrame) {
+        const nextCount = currentCount + 1;
+        this.consecutiveViolationCounts.set(rule.id, nextCount);
+
+        const requiredFrames = rule.minViolationFrames ?? 5;
+        if (nextCount >= requiredFrames) {
+          activeViolations.push(rule);
+        }
+      } else {
+        this.consecutiveViolationCounts.set(rule.id, 0);
       }
     }
 
@@ -227,7 +291,6 @@ export class RuleEngine {
       };
     }
 
-    // Contextual positive cues per phase
     if (currentPhase.id === this.config.topPhaseId) {
       return {
         activeViolations: [],
@@ -244,7 +307,7 @@ export class RuleEngine {
           type: 'success',
         },
       };
-    } else if (currentPhase.id === 'descending') {
+    } else if (currentPhase.id === this.config.descendingPhaseId) {
       return {
         activeViolations: [],
         feedback: {
@@ -265,5 +328,6 @@ export class RuleEngine {
 
   reset() {
     this.primaryAngleHistory = [];
+    this.consecutiveViolationCounts.clear();
   }
 }

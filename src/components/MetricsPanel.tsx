@@ -131,15 +131,24 @@ export const MetricsPanel: React.FC<MetricsPanelProps> = ({
         {config.angles.map((def) => {
           const val = angles[def.id];
           const hasVal = val !== null && val !== undefined;
-          const displayVal = hasVal ? `${Math.round(val!)}${def.unit || '°'}` : '--';
+          const isSigned = def.type === 'signed_hip_deviation';
+          const displayVal = hasVal
+            ? isSigned
+              ? `${val! > 0 ? '+' : ''}${val!.toFixed(2)}`
+              : `${Math.round(val!)}${def.unit || '°'}`
+            : '--';
 
           // Ideal target range
-          const idealMin = def.idealRange?.[0] ?? 60;
-          const idealMax = def.idealRange?.[1] ?? 120;
+          const idealMin = def.idealRange?.[0] ?? (isSigned ? -0.08 : 60);
+          const idealMax = def.idealRange?.[1] ?? (isSigned ? 0.08 : 120);
           const isWithinIdeal = hasVal && val! >= idealMin && val! <= idealMax;
 
-          // Normalized percentage for progress bar (0 to 180 deg)
-          const pct = hasVal ? Math.min(100, Math.max(0, (val! / 180) * 100)) : 0;
+          // Normalized percentage for progress bar
+          const pct = hasVal
+            ? isSigned
+              ? Math.min(100, Math.max(0, ((val! + 0.25) / 0.5) * 100))
+              : Math.min(100, Math.max(0, (val! / 180) * 100))
+            : 50;
 
           return (
             <div
@@ -175,13 +184,13 @@ export const MetricsPanel: React.FC<MetricsPanelProps> = ({
                   />
                 </div>
                 <div className="flex justify-between text-[9px] text-slate-500 font-mono mt-1">
-                  <span>0°</span>
+                  <span>{isSigned ? '-0.25' : '0°'}</span>
                   {def.idealRange && (
                     <span className="text-emerald-500 font-medium">
-                      Target: {idealMin}° - {idealMax}°
+                      Target: {idealMin}{def.unit || (isSigned ? '' : '°')} to {idealMax}{def.unit || (isSigned ? '' : '°')}
                     </span>
                   )}
-                  <span>180°</span>
+                  <span>{isSigned ? '+0.25' : '180°'}</span>
                 </div>
               </div>
             </div>

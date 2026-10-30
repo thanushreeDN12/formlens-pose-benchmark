@@ -1,19 +1,10 @@
 /**
  * Rep Counting State Machine
- * Driven strictly by exercise phase transitions.
- * Ensures reps are counted only upon completing a full down-up cycle.
+ * Driven strictly by exercise phase transitions and config parameters.
+ * Eliminates duplicate interface definitions and hardcoded thresholds.
  */
 
-import { ExerciseConfig, FormRule, PhaseDefinition, RepResult } from '../types/pose';
-
-export interface RepState {
-  repCount: number;
-  goodReps: number;
-  badReps: number;
-  currentRepProgress: number; // 0 to 100% of range of motion
-  isMoving: boolean;
-  minAngleInCurrentRep: number | null;
-}
+import { ExerciseConfig, FormRule, PhaseDefinition, RepResult, RepState } from '../types/pose';
 
 export class RepCounter {
   private config: ExerciseConfig;
@@ -66,7 +57,7 @@ export class RepCounter {
       }
     }
 
-    // Accumulate violations occurred during active movement
+    // Accumulate violations that have satisfied persistence criteria during movement
     if (this.state !== 'READY') {
       for (const v of activeViolations) {
         this.repViolations.add(v.message);
@@ -75,16 +66,19 @@ export class RepCounter {
 
     const topPhaseId = this.config.topPhaseId;
     const bottomPhaseId = this.config.bottomPhaseId;
+    const descendingPhaseId = this.config.descendingPhaseId;
+    const ascendingPhaseId = this.config.ascendingPhaseId;
+    const reboundAngle = this.config.reboundAngle ?? 105;
+    const minRomAngle = this.config.minRomAngle ?? 145;
 
     switch (this.state) {
       case 'READY': {
-        // When transitioning out of top phase into descending
-        if (phase.id === 'descending' || phase.id === bottomPhaseId) {
+        if (phase.id === descendingPhaseId || phase.id === bottomPhaseId) {
           this.state = 'DESCENDING';
           this.repStartTime = timestampMs;
           this.minAngleReached = primaryAngle ?? 180;
           this.maxAngleReached = primaryAngle ?? 180;
-          this.reachedBottom = (phase.id === bottomPhaseId);
+          this.reachedBottom = phase.id === bottomPhaseId;
           this.repViolations.clear();
         }
         break;
@@ -94,11 +88,9 @@ export class RepCounter {
         if (phase.id === bottomPhaseId) {
           this.state = 'BOTTOM';
           this.reachedBottom = true;
-        } else if (phase.id === 'ascending') {
-          // Began reversing before hitting bottom
+        } else if (phase.id === ascendingPhaseId) {
           this.state = 'ASCENDING';
         } else if (phase.id === topPhaseId) {
-          // Aborted without real descent (false start), reset to READY
           this.state = 'READY';
           this.repStartTime = null;
         }
@@ -106,14 +98,13 @@ export class RepCounter {
       }
 
       case 'BOTTOM': {
-        if (phase.id === 'ascending' || (primaryAngle && primaryAngle > 105)) {
+        if (phase.id === ascendingPhaseId || (primaryAngle !== null && primaryAngle > reboundAngle)) {
           this.state = 'ASCENDING';
         }
         break;
       }
 
       case 'ASCENDING': {
-        // Once returned to top phase (standing or plank up)
         if (phase.id === topPhaseId) {
           const duration = this.repStartTime
             ? Math.max(0.5, Math.round(((timestampMs - this.repStartTime) / 1000) * 10) / 10)
@@ -122,16 +113,18 @@ export class RepCounter {
           // Check bottom depth requirement
           const bottomRule = this.config.rules.find((r) => r.triggerPhase === 'bottom_requirement');
           if (bottomRule && !this.reachedBottom) {
-            // Also check threshold
             const { threshold, operator } = bottomRule.condition;
-            const met = operator === '<=' ? this.minAngleReached <= threshold : this.minAngleReached < threshold;
+            const met =
+              operator === '<='
+                ? this.minAngleReached <= threshold
+                : this.minAngleReached < threshold;
             if (!met) {
               this.repViolations.add(bottomRule.message);
             }
           }
 
-          // Count valid rep if there was at least notable range of movement (e.g. min angle < 140)
-          if (this.minAngleReached < 145) {
+          // Count valid rep only if minimum ROM angle was attained
+          if (this.minAngleReached < minRomAngle) {
             this.repNumber += 1;
             const violationsArray = Array.from(this.repViolations);
             const formLabel: 'good_form' | 'bad_form' =
@@ -154,7 +147,6 @@ export class RepCounter {
             }
           }
 
-          // Reset for next rep
           this.state = 'READY';
           this.repStartTime = null;
           this.minAngleReached = 999;
@@ -168,12 +160,17 @@ export class RepCounter {
     // Compute progress of current rep: 0% at top, 100% at bottom target
     let currentRepProgress = 0;
     if (primaryAngle !== null && !isNaN(primaryAngle)) {
-      const topThresh = this.config.phases.find((p) => p.id === topPhaseId)?.condition.threshold ?? 160;
-      const botThresh = this.config.phases.find((p) => p.id === bottomPhaseId)?.condition.threshold ?? 90;
+      const topThresh =
+        this.config.phases.find((p) => p.id === topPhaseId)?.condition.threshold ?? 160;
+      const botThresh =
+        this.config.phases.find((p) => p.id === bottomPhaseId)?.condition.threshold ?? 90;
       const totalRange = topThresh - botThresh;
       if (totalRange > 0) {
         const currentDiff = topThresh - primaryAngle;
-        currentRepProgress = Math.min(100, Math.max(0, Math.round((currentDiff / totalRange) * 100)));
+        currentRepProgress = Math.min(
+          100,
+          Math.max(0, Math.round((currentDiff / totalRange) * 100))
+        );
       }
     }
 
@@ -187,7 +184,10 @@ export class RepCounter {
         badReps,
         currentRepProgress,
         isMoving: this.state !== 'READY',
-        minAngleInCurrentRep: this.state !== 'READY' && this.minAngleReached < 900 ? Math.round(this.minAngleReached) : null,
+        minAngleInCurrentRep:
+          this.state !== 'READY' && this.minAngleReached < 900
+            ? Math.round(this.minAngleReached)
+            : null,
       },
       newRep,
     };

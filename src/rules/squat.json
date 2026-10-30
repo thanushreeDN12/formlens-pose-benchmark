@@ -5,6 +5,10 @@
   "primaryAngleId": "knee_angle",
   "bottomPhaseId": "bottom",
   "topPhaseId": "standing",
+  "descendingPhaseId": "descending",
+  "ascendingPhaseId": "ascending",
+  "reboundAngle": 105,
+  "minRomAngle": 145,
   "cyclePhases": ["standing", "descending", "bottom", "ascending"],
   "angles": [
     {
@@ -87,6 +91,7 @@
       "message": "Squat deeper: knees should reach ≤ 100° at bottom",
       "severity": "error",
       "triggerPhase": "bottom_requirement",
+      "minViolationFrames": 5,
       "condition": {
         "angleId": "knee_angle",
         "operator": "<=",
@@ -100,6 +105,7 @@
       "message": "Excessive forward lean: keep chest proud and spine neutral",
       "severity": "warning",
       "triggerPhase": "all",
+      "minViolationFrames": 5,
       "condition": {
         "angleId": "torso_inclination",
         "operator": ">",
@@ -113,6 +119,7 @@
       "message": "Hips folding too sharply: sit down rather than bending forward",
       "severity": "warning",
       "triggerPhase": "descending",
+      "minViolationFrames": 5,
       "condition": {
         "angleId": "hip_angle",
         "operator": "<",

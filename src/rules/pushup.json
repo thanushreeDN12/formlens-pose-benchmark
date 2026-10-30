@@ -1,10 +1,14 @@
 {
   "id": "pushup",
   "name": "Standard Push-up",
-  "description": "Analyzes elbow flexion depth, plank body-line alignment, and core stability through full push-up cadence.",
+  "description": "Analyzes elbow flexion depth, plank body-line alignment, and signed hip offset through full push-up cadence.",
   "primaryAngleId": "elbow_angle",
   "bottomPhaseId": "bottom",
   "topPhaseId": "plank_up",
+  "descendingPhaseId": "descending",
+  "ascendingPhaseId": "ascending",
+  "reboundAngle": 100,
+  "minRomAngle": 145,
   "cyclePhases": ["plank_up", "descending", "bottom", "ascending"],
   "angles": [
     {
@@ -18,14 +22,14 @@
       "unit": "°"
     },
     {
-      "id": "body_line_angle",
-      "name": "Plank Line",
-      "description": "Alignment of shoulder, hip, and ankle",
-      "type": "joint_3pt",
-      "leftLandmarks": [11, 23, 27],
-      "rightLandmarks": [12, 24, 28],
-      "idealRange": [165, 180],
-      "unit": "°"
+      "id": "signed_hip_deviation",
+      "name": "Signed Hip Offset",
+      "description": "Perpendicular offset of hip from shoulder-ankle line normalized by torso length (neg: sag, pos: pike)",
+      "type": "signed_hip_deviation",
+      "leftHipDeviation": [11, 23, 27],
+      "rightHipDeviation": [12, 24, 28],
+      "idealRange": [-0.08, 0.08],
+      "unit": ""
     }
   ],
   "phases": [
@@ -77,6 +81,7 @@
       "message": "Lower chest further: elbows should bend to ≤ 95°",
       "severity": "error",
       "triggerPhase": "bottom_requirement",
+      "minViolationFrames": 5,
       "condition": {
         "angleId": "elbow_angle",
         "operator": "<=",
@@ -90,12 +95,13 @@
       "message": "Hips sagging below line: tighten glutes & abs",
       "severity": "error",
       "triggerPhase": "all",
+      "minViolationFrames": 5,
       "condition": {
-        "angleId": "body_line_angle",
+        "angleId": "signed_hip_deviation",
         "operator": "<",
-        "threshold": 160
+        "threshold": -0.10
       },
-      "remedy": "Squeeze core, glutes, and thighs to form a rigid plank from head to heel."
+      "remedy": "Squeeze core, glutes, and thighs to bring your pelvis back up into line."
     },
     {
       "id": "hip_pike",
@@ -103,12 +109,13 @@
       "message": "Hips raised too high: level spine with shoulders",
       "severity": "warning",
       "triggerPhase": "all",
+      "minViolationFrames": 5,
       "condition": {
-        "angleId": "body_line_angle",
-        "operator": "<",
-        "threshold": 150
+        "angleId": "signed_hip_deviation",
+        "operator": ">",
+        "threshold": 0.12
       },
-      "remedy": "Bring your pelvis down into a straight horizontal plank."
+      "remedy": "Bring your pelvis down into a straight horizontal plank aligned with your feet and shoulders."
     }
   ]
 }

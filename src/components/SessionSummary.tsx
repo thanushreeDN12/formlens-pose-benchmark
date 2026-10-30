@@ -2,6 +2,7 @@
  * SessionSummary Component:
  * Summarizes workout performance (total reps, good-form %, common violations),
  * and handles JSON export of per-frame keypoints & biomechanical telemetry.
+ * Computes true session averages from all processed frames.
  */
 
 import React, { useState } from 'react';
@@ -21,15 +22,19 @@ import {
   CheckCircle,
   FileSpreadsheet,
 } from 'lucide-react';
-import confetti from 'canvas-confetti';
 
 interface SessionSummaryProps {
   exercise: ExerciseType;
   cameraView: CameraView;
   reps: RepResult[];
   recordedFrames: FrameData[];
-  avgFps: number;
-  avgInferenceTimeMs: number;
+  videoMeta: {
+    fileName: string | null;
+    width: number;
+    height: number;
+  };
+  modelName: string;
+  fps: number;
   onResetSession: () => void;
 }
 
@@ -38,8 +43,9 @@ export const SessionSummary: React.FC<SessionSummaryProps> = ({
   cameraView,
   reps,
   recordedFrames,
-  avgFps,
-  avgInferenceTimeMs,
+  videoMeta,
+  modelName,
+  fps,
   onResetSession,
 }) => {
   const [downloading, setDownloading] = useState(false);
@@ -50,7 +56,7 @@ export const SessionSummary: React.FC<SessionSummaryProps> = ({
   const badReps = reps.filter((r) => r.formLabel === 'bad_form').length;
   const goodFormPercentage = totalReps > 0 ? Math.round((goodReps / totalReps) * 100) : 0;
 
-  // Calculate most common violation
+  // Calculate most common violation across reps
   const violationCounts: Record<string, number> = {};
   for (const r of reps) {
     for (const v of r.violations) {
@@ -67,8 +73,37 @@ export const SessionSummary: React.FC<SessionSummaryProps> = ({
     }
   }
 
+  // True session averages from all recorded frames
+  const totalFrames = recordedFrames.length;
+  let trueAvgFps = 0;
+  let trueAvgInferenceTimeMs = 0;
+
+  if (totalFrames > 0) {
+    const sumInference = recordedFrames.reduce((acc, f) => acc + f.inferenceTimeMs, 0);
+    trueAvgInferenceTimeMs = Math.round((sumInference / totalFrames) * 10) / 10;
+
+    const firstTime = recordedFrames[0].mediaTimeMs;
+    const lastTime = recordedFrames[totalFrames - 1].mediaTimeMs;
+    const durationSec = (lastTime - firstTime) / 1000;
+    if (durationSec > 0 && totalFrames > 1) {
+      trueAvgFps = Math.round(((totalFrames - 1) / durationSec) * 10) / 10;
+    } else {
+      trueAvgFps = Math.round(fps * 10) / 10;
+    }
+  } else {
+    trueAvgFps = Math.round(fps * 10) / 10;
+  }
+
   const handleExport = () => {
     setDownloading(true);
+
+    const sessionDurationSec =
+      totalFrames > 0
+        ? Math.round(
+            ((recordedFrames[totalFrames - 1].mediaTimeMs - recordedFrames[0].mediaTimeMs) / 1000) *
+              10
+          ) / 10
+        : 0;
 
     const metrics: SessionMetrics = {
       totalReps,
@@ -76,25 +111,28 @@ export const SessionSummary: React.FC<SessionSummaryProps> = ({
       badReps,
       goodFormPercentage,
       mostCommonViolation,
-      avgFps: Math.round(avgFps * 10) / 10,
-      avgInferenceTimeMs: Math.round(avgInferenceTimeMs * 10) / 10,
-      sessionDurationSec:
-        recordedFrames.length > 0
-          ? Math.round(
-              ((recordedFrames[recordedFrames.length - 1].timestampMs -
-                recordedFrames[0].timestampMs) /
-                1000) *
-                10
-            ) / 10
-          : 0,
+      avgFps: trueAvgFps,
+      avgInferenceTimeMs: trueAvgInferenceTimeMs,
+      sessionDurationSec,
+      totalFrames,
     };
 
     const exportPayload: SessionExportData = {
-      app: 'FormLens',
-      version: '1.0.0',
-      exercise,
-      cameraView,
-      exportedAt: new Date().toISOString(),
+      header: {
+        app: 'FormLens',
+        version: '1.0.0',
+        modelName,
+        exercise,
+        cameraView,
+        videoFileName: videoMeta.fileName,
+        videoWidth: videoMeta.width,
+        videoHeight: videoMeta.height,
+        fps: trueAvgFps,
+        avgFps: trueAvgFps,
+        avgInferenceTimeMs: trueAvgInferenceTimeMs,
+        totalFrames,
+        exportedAt: new Date().toISOString(),
+      },
       metrics,
       reps,
       frames: recordedFrames,
@@ -106,7 +144,8 @@ export const SessionSummary: React.FC<SessionSummaryProps> = ({
 
     const a = document.createElement('a');
     a.href = url;
-    a.download = `formlens-${exercise}-${cameraView}-${Date.now()}.json`;
+    const safeName = videoMeta.fileName ? `-${videoMeta.fileName.replace(/\.[^/.]+$/, '')}` : '';
+    a.download = `formlens-${exercise}-${cameraView}${safeName}-${Date.now()}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -114,14 +153,6 @@ export const SessionSummary: React.FC<SessionSummaryProps> = ({
 
     setDownloading(false);
     setExportedSuccess(true);
-
-    if (goodFormPercentage >= 70 && totalReps >= 3) {
-      confetti({
-        particleCount: 50,
-        spread: 60,
-        origin: { y: 0.8 },
-      });
-    }
 
     setTimeout(() => {
       setExportedSuccess(false);
@@ -222,7 +253,7 @@ export const SessionSummary: React.FC<SessionSummaryProps> = ({
           </p>
 
           <span className="text-[10px] text-slate-500 font-mono mt-1">
-            {recordedFrames.length} telemetry frames captured for export
+            {totalFrames} full frames logged (avg {trueAvgFps} FPS • {trueAvgInferenceTimeMs}ms)
           </span>
         </div>
       </div>
@@ -231,7 +262,7 @@ export const SessionSummary: React.FC<SessionSummaryProps> = ({
       <div className="flex items-center gap-2 text-[11px] text-slate-400 bg-slate-950/40 border border-slate-800/60 px-3 py-2 rounded-lg">
         <FileSpreadsheet className="w-4 h-4 text-emerald-400 shrink-0" />
         <span>
-          Export includes full 33-landmark coordinate arrays, calculated joint angles, per-rep metrics, and performance benchmarks for future YOLOv8 / model comparisons.
+          Export includes {totalFrames} un-decimated frame records with 33 normalized landmarks, 33 3D world landmarks, raw & smoothed angles, and session header metadata.
         </span>
       </div>
     </div>

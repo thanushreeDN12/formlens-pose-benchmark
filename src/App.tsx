@@ -28,13 +28,12 @@ import { MetricsPanel } from './components/MetricsPanel';
 import { FeedbackPanel } from './components/FeedbackPanel';
 import { RepTable } from './components/RepTable';
 import { SessionSummary } from './components/SessionSummary';
-import { Activity, Dumbbell, Zap, Layers } from 'lucide-react';
+import { Dumbbell, Zap, Layers } from 'lucide-react';
 
 const squatConfig = squatConfigJson as unknown as ExerciseConfig;
 const pushupConfig = pushupConfigJson as unknown as ExerciseConfig;
 
 export default function App() {
-  // Configuration states
   const [exercise, setExercise] = useState<ExerciseType>('squat');
   const [cameraView, setCameraView] = useState<CameraView>('lateral');
 
@@ -47,14 +46,28 @@ export default function App() {
   // Model loading state
   const [isModelReady, setIsModelReady] = useState(false);
   const [modelLoadingMessage, setModelLoadingMessage] = useState(
-    'Loading MediaPipe Pose Landmarker vision tasks...'
+    'Loading MediaPipe Pose Landmarker from /models/pose_landmarker_lite.task...'
   );
+
+  // Video metadata
+  const [videoMeta, setVideoMeta] = useState<{
+    fileName: string | null;
+    width: number;
+    height: number;
+  }>({
+    fileName: null,
+    width: 640,
+    height: 480,
+  });
 
   // Live telemetry states
   const [landmarks, setLandmarks] = useState<Landmark[] | null>(null);
   const [angles, setAngles] = useState<Record<string, number | null>>({});
   const [dominantSide, setDominantSide] = useState<'left' | 'right'>('left');
   const [currentPhase, setCurrentPhase] = useState<PhaseDefinition>(squatConfig.phases[0]);
+  // Ref for phase tracking to eliminate callback re-creation
+  const currentPhaseRef = useRef<PhaseDefinition>(squatConfig.phases[0]);
+
   const [activeViolations, setActiveViolations] = useState(squatConfig.rules.slice(0, 0));
   const [feedback, setFeedback] = useState<{
     message: string;
@@ -79,6 +92,7 @@ export default function App() {
   // Telemetry metrics
   const [fps, setFps] = useState<number>(0);
   const [inferenceTimeMs, setInferenceTimeMs] = useState<number>(0);
+  // Full, un-decimated frame history
   const [recordedFrames, setRecordedFrames] = useState<FrameData[]>([]);
 
   // Telemetry accumulators
@@ -86,9 +100,8 @@ export default function App() {
   const frameTimesRef = useRef<number[]>([]);
   const inferenceTimesRef = useRef<number[]>([]);
   const frameCountRef = useRef<number>(0);
-  const lastDrawnTimestampRef = useRef<number>(0);
+  const lastDrawnTimestampRef = useRef<number>(-1);
 
-  // Current config getter
   const activeConfig = exercise === 'squat' ? squatConfig : pushupConfig;
 
   // Initialize Pose Landmarker on mount
@@ -99,7 +112,7 @@ export default function App() {
 
     async function loadEngine() {
       try {
-        setModelLoadingMessage('Fetching WASM binaries & PoseLandmarker weights...');
+        setModelLoadingMessage('Initializing PoseLandmarker from local model assets...');
         await engine.init();
         if (isMounted) {
           setIsModelReady(true);
@@ -108,7 +121,7 @@ export default function App() {
       } catch (err) {
         console.error('Pose landmarker initialization failed:', err);
         if (isMounted) {
-          setModelLoadingMessage('Model failed to load. Please check network connection.');
+          setModelLoadingMessage('Model initialization failed. Please check network/assets.');
         }
       }
     }
@@ -130,12 +143,15 @@ export default function App() {
     repCounterRef.current.setConfig(cfg);
     filterRef.current.reset();
 
+    currentPhaseRef.current = cfg.phases[0];
     setCurrentPhase(cfg.phases[0]);
     setActiveViolations([]);
     setLandmarks(null);
     setAngles({});
     setReps([]);
     setRecordedFrames([]);
+    frameCountRef.current = 0;
+    lastDrawnTimestampRef.current = -1;
     setRepState({
       repCount: 0,
       goodReps: 0,
@@ -163,19 +179,19 @@ export default function App() {
     });
   }, []);
 
-  // Per-frame detection & telemetry hook
+  // Frame-accurate processing callback
   const handleFrame = useCallback(
     async (video: HTMLVideoElement, timestampMs: number) => {
       const engine = poseEngineRef.current;
       if (!engine || !engine.isReady()) return;
 
-      // Rate limit slightly if timestamps are too close (MediaPipe requires monotonically increasing timestamps)
-      if (timestampMs <= lastDrawnTimestampRef.current) {
+      // Avoid redundant execution on identical video time
+      if (timestampMs === lastDrawnTimestampRef.current && timestampMs !== 0) {
         return;
       }
       lastDrawnTimestampRef.current = timestampMs;
 
-      // Calculate live FPS
+      // Real FPS calculation
       const now = performance.now();
       const delta = now - lastFrameTimeRef.current;
       lastFrameTimeRef.current = now;
@@ -188,9 +204,9 @@ export default function App() {
         setFps(avgFps);
       }
 
-      // Pose detection with inference timer
+      // Detection with timing
       const infStart = performance.now();
-      const detectedLandmarks = await engine.detect(video, timestampMs);
+      const detectionResult = await engine.detect(video, timestampMs);
       const infDuration = performance.now() - infStart;
 
       inferenceTimesRef.current.push(infDuration);
@@ -200,30 +216,36 @@ export default function App() {
         inferenceTimesRef.current.length;
       setInferenceTimeMs(avgInf);
 
-      if (!detectedLandmarks) {
+      if (!detectionResult || !detectionResult.landmarks) {
         setLandmarks(null);
         return;
       }
 
+      const detectedLandmarks = detectionResult.landmarks;
+      const detectedWorldLandmarks = detectionResult.worldLandmarks;
       setLandmarks(detectedLandmarks);
 
-      // Compute raw angles and dominant side
+      // 1. ANGLE ACCURACY: scale coordinates by video pixel dimensions
+      const videoWidth = video.videoWidth || 640;
+      const videoHeight = video.videoHeight || 480;
+
       const { angles: rawAngles, dominantSide: domSide } =
-        ruleEngineRef.current.computeAngles(detectedLandmarks);
+        ruleEngineRef.current.computeAngles(detectedLandmarks, videoWidth, videoHeight);
       setDominantSide(domSide);
 
       // Apply 5-frame moving average filter
       const filteredAngles = filterRef.current.filterAll(rawAngles);
       setAngles(filteredAngles);
 
-      // Determine phase
+      // 7. CLEANUP: Use ref for previous phase instead of state dependency
       const phase = ruleEngineRef.current.determinePhase(
         filteredAngles,
-        currentPhase.id
+        currentPhaseRef.current.id
       );
+      currentPhaseRef.current = phase;
       setCurrentPhase(phase);
 
-      // Evaluate rules & live feedback
+      // Evaluate rules & persistent violation check (minViolationFrames)
       const ruleEval = ruleEngineRef.current.evaluateRules(filteredAngles, phase);
       setActiveViolations(ruleEval.activeViolations);
       setFeedback(ruleEval.feedback);
@@ -237,36 +259,32 @@ export default function App() {
       );
       setRepState(nextRepState);
 
-      // Record telemetry frame (decimate to max 1200 frames for memory efficiency)
+      // 3. FULL EXPORT: Record every processed frame (no decimation, no cap, no dropping)
       frameCountRef.current += 1;
-      if (frameCountRef.current % 2 === 0) {
-        const frameRecord: FrameData = {
-          frameIndex: frameCountRef.current,
-          timestampMs: Math.round(timestampMs),
-          keypoints: detectedLandmarks,
-          angles: filteredAngles,
-          phase: phase.id,
-          inferenceTimeMs: Math.round(infDuration * 10) / 10,
-        };
+      const frameRecord: FrameData = {
+        frameIndex: frameCountRef.current,
+        mediaTimeMs: Math.round(timestampMs * 10) / 10,
+        landmarks: detectedLandmarks,
+        worldLandmarks: detectedWorldLandmarks,
+        rawAngles,
+        smoothedAngles: filteredAngles,
+        phase: phase.id,
+        inferenceTimeMs: Math.round(infDuration * 10) / 10,
+      };
 
-        setRecordedFrames((prev) => {
-          if (prev.length > 1200) {
-            return [...prev.slice(100), frameRecord];
-          }
-          return [...prev, frameRecord];
-        });
-      }
+      setRecordedFrames((prev) => [...prev, frameRecord]);
     },
-    [currentPhase.id]
+    [] // Stable callback reference
   );
 
-  // Reset entire session
   const handleResetSession = useCallback(() => {
     repCounterRef.current.reset();
     ruleEngineRef.current.reset();
     filterRef.current.reset();
     setReps([]);
     setRecordedFrames([]);
+    frameCountRef.current = 0;
+    lastDrawnTimestampRef.current = -1;
     setRepState({
       repCount: 0,
       goodReps: 0,
@@ -307,7 +325,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Engine Status pill */}
           <div className="hidden sm:flex items-center gap-2">
             <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-xs font-mono">
               <span
@@ -316,7 +333,7 @@ export default function App() {
                 }`}
               />
               <span className="text-slate-300">
-                {isModelReady ? 'MediaPipe Pose Active' : 'Loading Engine...'}
+                {isModelReady ? 'PoseLandmarker Active' : 'Loading Engine...'}
               </span>
             </div>
 
@@ -338,6 +355,7 @@ export default function App() {
             onExerciseChange={handleExerciseChange}
             onCameraViewChange={setCameraView}
             onFrame={handleFrame}
+            onVideoMetaChange={setVideoMeta}
             landmarks={landmarks}
             angles={angles}
             dominantSide={dominantSide}
@@ -346,13 +364,11 @@ export default function App() {
             modelLoadingMessage={modelLoadingMessage}
           />
 
-          {/* Rep History Table */}
           <RepTable reps={reps} />
         </div>
 
         {/* Right Column: Live Metrics, Biomechanical Feedback & Session Summary (5 cols) */}
         <div className="lg:col-span-5 flex flex-col gap-4">
-          {/* Live Telemetry and Angles Panel */}
           <MetricsPanel
             fps={fps}
             inferenceTimeMs={inferenceTimeMs}
@@ -367,21 +383,20 @@ export default function App() {
             minAngleInCurrentRep={repState.minAngleInCurrentRep}
           />
 
-          {/* Real-time Biomechanical Feedback & Rule Checklist */}
           <FeedbackPanel
             config={activeConfig}
             activeViolations={activeViolations}
             feedback={feedback}
           />
 
-          {/* Overall Session Summary & JSON Exporter */}
           <SessionSummary
             exercise={exercise}
             cameraView={cameraView}
             reps={reps}
             recordedFrames={recordedFrames}
-            avgFps={fps}
-            avgInferenceTimeMs={inferenceTimeMs}
+            videoMeta={videoMeta}
+            modelName={poseEngineRef.current?.name || 'MediaPipe PoseLandmarker Lite'}
+            fps={fps}
             onResetSession={handleResetSession}
           />
         </div>
@@ -395,9 +410,11 @@ export default function App() {
             <span>Extensible Architecture: Pluggable PoseEngine (MediaPipe / YOLOv8 ready)</span>
           </div>
           <div className="flex items-center gap-3">
-            <span className="font-mono">JSON Config Rules Engine</span>
+            <span className="font-mono">Config-Driven Rules</span>
             <span>•</span>
-            <span className="font-mono">Moving Average Smoothing (N=5)</span>
+            <span className="font-mono">Frame-Accurate rVFC</span>
+            <span>•</span>
+            <span className="font-mono">Uncapped Telemetry Export</span>
           </div>
         </div>
       </footer>

@@ -101,7 +101,8 @@ export const FeedbackPanel: React.FC<FeedbackPanelProps> = ({
 
                 <div className="flex items-center gap-2 text-[11px] font-mono">
                   <span className="text-slate-500">
-                    {rule.condition.operator} {rule.condition.threshold}°
+                    {rule.condition.operator} {rule.condition.threshold}
+                    {Math.abs(rule.condition.threshold) > 1 ? '°' : ''}
                   </span>
                   <span
                     className={`font-semibold ${

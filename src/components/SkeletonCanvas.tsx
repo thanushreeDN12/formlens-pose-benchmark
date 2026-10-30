@@ -179,8 +179,19 @@ export const SkeletonCanvas: React.FC<SkeletonCanvasProps> = ({
         );
       }
 
-      // Body line angle
-      if (angles['body_line_angle'] !== null && landmarks[hipIdx] && (landmarks[hipIdx].visibility ?? 1) >= 0.5) {
+      // Signed hip deviation (push-up)
+      if (angles['signed_hip_deviation'] !== undefined && angles['signed_hip_deviation'] !== null && landmarks[hipIdx] && (landmarks[hipIdx].visibility ?? 1) >= 0.5) {
+        const dev = angles['signed_hip_deviation']!;
+        const isBad = dev < -0.10 || dev > 0.12;
+        const signStr = dev > 0 ? `+${dev.toFixed(2)}` : dev.toFixed(2);
+        drawAngleBadge(
+          ctx,
+          mapX(landmarks[hipIdx].x),
+          mapY(landmarks[hipIdx].y) - 22,
+          `Offset: ${signStr}`,
+          isBad ? '#ef4444' : '#10b981'
+        );
+      } else if (angles['body_line_angle'] !== null && landmarks[hipIdx] && (landmarks[hipIdx].visibility ?? 1) >= 0.5) {
         const isSagging = (angles['body_line_angle'] ?? 180) < 160;
         drawAngleBadge(
           ctx,

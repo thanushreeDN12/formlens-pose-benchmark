@@ -1,7 +1,8 @@
 /**
  * VideoPlayer Component:
- * Manages video sources (Webcam, Uploaded mp4/webm file, Sample Motion),
- * handles playback control, mirror toggle, and overlays SkeletonCanvas.
+ * Manages video sources (Webcam, Uploaded mp4/webm file, Sample Motion).
+ * Uses video.requestVideoFrameCallback for frame-accurate processing of uploaded videos,
+ * and requestAnimationFrame for webcam and simulated streams.
  */
 
 import React, { useRef, useState, useEffect, useCallback } from 'react';
@@ -24,12 +25,29 @@ import {
 } from 'lucide-react';
 import { soundController } from '../utils/audio';
 
+interface CustomVideoFrameCallbackMetadata {
+  presentationTime: DOMHighResTimeStamp;
+  expectedDisplayTime: DOMHighResTimeStamp;
+  width: number;
+  height: number;
+  mediaTime: number;
+  presentedFrames: number;
+}
+
+type HTMLVideoElementWithRVFC = HTMLVideoElement & {
+  requestVideoFrameCallback?: (
+    callback: (now: DOMHighResTimeStamp, metadata: CustomVideoFrameCallbackMetadata) => void
+  ) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
+
 interface VideoPlayerProps {
   exercise: ExerciseType;
   cameraView: CameraView;
   onExerciseChange: (exercise: ExerciseType) => void;
   onCameraViewChange: (view: CameraView) => void;
   onFrame: (video: HTMLVideoElement, timestampMs: number) => void;
+  onVideoMetaChange?: (meta: { fileName: string | null; width: number; height: number }) => void;
   landmarks: Landmark[] | null;
   angles: Record<string, number | null>;
   dominantSide: 'left' | 'right';
@@ -44,6 +62,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onExerciseChange,
   onCameraViewChange,
   onFrame,
+  onVideoMetaChange,
   landmarks,
   angles,
   dominantSide,
@@ -51,7 +70,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   isModelReady,
   modelLoadingMessage,
 }) => {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoRef = useRef<HTMLVideoElementWithRVFC | null>(null);
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -62,6 +81,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [showAngles, setShowAngles] = useState<boolean>(true);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number }>({
     width: 640,
     height: 480,
@@ -70,15 +90,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const sampleStreamCleanupRef = useRef<(() => void) | null>(null);
   const animFrameIdRef = useRef<number | null>(null);
+  const rvfcHandleRef = useRef<number | null>(null);
 
-  // Sync sound controller state
   const handleToggleSound = () => {
     const next = !soundEnabled;
     setSoundEnabled(next);
     soundController.enabled = next;
   };
 
-  // Cleanup active streams
   const stopCurrentSource = useCallback(() => {
     if (sampleStreamCleanupRef.current) {
       sampleStreamCleanupRef.current();
@@ -89,12 +108,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       stream.getTracks().forEach((track) => track.stop());
       videoRef.current.srcObject = null;
     }
+    if (rvfcHandleRef.current !== null && videoRef.current?.cancelVideoFrameCallback) {
+      videoRef.current.cancelVideoFrameCallback(rvfcHandleRef.current);
+      rvfcHandleRef.current = null;
+    }
+    if (animFrameIdRef.current !== null) {
+      cancelAnimationFrame(animFrameIdRef.current);
+      animFrameIdRef.current = null;
+    }
   }, []);
 
-  // Initialize sample motion stream
   const initSampleStream = useCallback(() => {
     stopCurrentSource();
     setCameraError(null);
+    setUploadedFileName(null);
     if (!hiddenCanvasRef.current || !videoRef.current) return;
 
     const { stop, getStream } = createSampleMotionStream(exercise, hiddenCanvasRef.current, 30);
@@ -103,15 +130,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const stream = getStream();
     if (stream && videoRef.current) {
       videoRef.current.srcObject = stream;
+      videoRef.current.loop = true;
       videoRef.current.play().catch(() => {});
       setIsPlaying(true);
+      setIsMirrored(false);
     }
   }, [exercise, stopCurrentSource]);
 
-  // Initialize webcam
   const initWebcam = useCallback(async () => {
     stopCurrentSource();
     setCameraError(null);
+    setUploadedFileName(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -124,9 +153,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        videoRef.current.loop = false;
         videoRef.current.play().catch(() => {});
         setIsPlaying(true);
-        setIsMirrored(true); // Default mirror for webcam
+        setIsMirrored(true);
       }
     } catch (err) {
       console.error('Camera access denied or unavailable:', err);
@@ -134,14 +164,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [stopCurrentSource]);
 
-  // Initialize uploaded video
   const initUploadedVideo = useCallback(
     (url: string) => {
       stopCurrentSource();
       setCameraError(null);
       if (videoRef.current) {
         videoRef.current.src = url;
-        videoRef.current.loop = true;
+        // loop=false for uploaded videos as required
+        videoRef.current.loop = false;
         videoRef.current.play().catch(() => {});
         setIsPlaying(true);
         setIsMirrored(false);
@@ -150,7 +180,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     [stopCurrentSource]
   );
 
-  // Trigger source switch
   useEffect(() => {
     if (sourceType === 'sample') {
       initSampleStream();
@@ -164,56 +193,117 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [sourceType, uploadedVideoUrl, initSampleStream, initWebcam, initUploadedVideo, stopCurrentSource]);
 
-  // Video metadata loaded -> update dimensions
   const handleLoadedMetadata = () => {
     if (videoRef.current) {
-      setVideoDimensions({
+      const dims = {
         width: videoRef.current.videoWidth || 640,
         height: videoRef.current.videoHeight || 480,
-      });
+      };
+      setVideoDimensions(dims);
+      if (onVideoMetaChange) {
+        onVideoMetaChange({
+          fileName: uploadedFileName,
+          width: dims.width,
+          height: dims.height,
+        });
+      }
     }
   };
 
-  // Continuous frame processing loop
+  // Frame processing loop:
+  // For uploaded video: use video.requestVideoFrameCallback (metadata.mediaTime * 1000)
+  // For webcam / sample: use requestAnimationFrame with performance.now()
   useEffect(() => {
     let active = true;
+    const video = videoRef.current;
+    if (!video) return;
 
-    const processLoop = (now: number) => {
-      if (!active) return;
+    if (sourceType === 'upload' && typeof video.requestVideoFrameCallback === 'function') {
+      const onVideoFrame = (_now: DOMHighResTimeStamp, metadata: CustomVideoFrameCallbackMetadata) => {
+        if (!active) return;
+        const mediaTimeMs = metadata.mediaTime * 1000;
+        onFrame(video, mediaTimeMs);
 
-      const video = videoRef.current;
-      if (video && !video.paused && !video.ended && video.readyState >= 2) {
-        onFrame(video, now);
-      }
+        if (!video.paused && !video.ended && active) {
+          rvfcHandleRef.current = video.requestVideoFrameCallback!(onVideoFrame);
+        }
+      };
 
-      animFrameIdRef.current = requestAnimationFrame(processLoop);
-    };
+      rvfcHandleRef.current = video.requestVideoFrameCallback(onVideoFrame);
 
-    animFrameIdRef.current = requestAnimationFrame(processLoop);
+      const handlePlay = () => {
+        setIsPlaying(true);
+        if (rvfcHandleRef.current === null && video.requestVideoFrameCallback) {
+          rvfcHandleRef.current = video.requestVideoFrameCallback(onVideoFrame);
+        }
+      };
+      const handleEnded = () => {
+        setIsPlaying(false);
+      };
+      const handlePause = () => {
+        setIsPlaying(false);
+      };
 
-    return () => {
-      active = false;
-      if (animFrameIdRef.current) {
-        cancelAnimationFrame(animFrameIdRef.current);
-      }
-    };
-  }, [onFrame]);
+      video.addEventListener('play', handlePlay);
+      video.addEventListener('pause', handlePause);
+      video.addEventListener('ended', handleEnded);
 
-  // Handle uploaded video file
+      return () => {
+        active = false;
+        video.removeEventListener('play', handlePlay);
+        video.removeEventListener('pause', handlePause);
+        video.removeEventListener('ended', handleEnded);
+        if (rvfcHandleRef.current !== null && video.cancelVideoFrameCallback) {
+          video.cancelVideoFrameCallback(rvfcHandleRef.current);
+          rvfcHandleRef.current = null;
+        }
+      };
+    } else {
+      // rAF loop for webcam and sample stream (or fallback if rVFC unsupported)
+      const rAfLoop = (now: number) => {
+        if (!active) return;
+        if (video && !video.paused && !video.ended && video.readyState >= 2) {
+          onFrame(video, now);
+        }
+        animFrameIdRef.current = requestAnimationFrame(rAfLoop);
+      };
+
+      animFrameIdRef.current = requestAnimationFrame(rAfLoop);
+
+      return () => {
+        active = false;
+        if (animFrameIdRef.current !== null) {
+          cancelAnimationFrame(animFrameIdRef.current);
+          animFrameIdRef.current = null;
+        }
+      };
+    }
+  }, [sourceType, onFrame]);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const url = URL.createObjectURL(file);
       setUploadedVideoUrl(url);
+      setUploadedFileName(file.name);
       setSourceType('upload');
+      if (onVideoMetaChange) {
+        onVideoMetaChange({
+          fileName: file.name,
+          width: videoDimensions.width,
+          height: videoDimensions.height,
+        });
+      }
     }
   };
 
-  // Play/pause controls
   const handlePlayPause = () => {
     if (!videoRef.current) return;
-    if (videoRef.current.paused) {
-      videoRef.current.play().then(() => setIsPlaying(true));
+    if (videoRef.current.paused || videoRef.current.ended) {
+      if (videoRef.current.ended) {
+        videoRef.current.currentTime = 0;
+      }
+      videoRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
     } else {
       videoRef.current.pause();
       setIsPlaying(false);
@@ -223,7 +313,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const handleRestart = () => {
     if (!videoRef.current) return;
     videoRef.current.currentTime = 0;
-    videoRef.current.play().then(() => setIsPlaying(true));
+    videoRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
   };
 
   return (
@@ -330,10 +420,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       {/* Main Video Viewport */}
       <div className="relative w-full aspect-[4/3] sm:aspect-[16/10] bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 shadow-2xl flex items-center justify-center group">
-        {/* Hidden Canvas for Sample Stream Generation */}
         <canvas ref={hiddenCanvasRef} className="hidden" />
 
-        {/* Video Element */}
         <video
           ref={videoRef}
           playsInline
@@ -343,7 +431,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           className={`w-full h-full object-contain ${isMirrored ? 'scale-x-[-1]' : ''}`}
         />
 
-        {/* Skeleton Canvas Overlay */}
         <SkeletonCanvas
           landmarks={landmarks}
           width={videoDimensions.width}
@@ -356,7 +443,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           showSkeleton={showSkeleton}
         />
 
-        {/* Model Initialization Overlay */}
         {!isModelReady && (
           <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-20">
             <div className="w-10 h-10 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mb-3" />
@@ -365,7 +451,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         )}
 
-        {/* Camera Permission / Error Warning */}
         {cameraError && (
           <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20">
             <VideoIcon className="w-10 h-10 text-rose-400 mb-2" />
@@ -387,6 +472,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
           <div className="bg-slate-900/80 backdrop-blur-md border border-slate-700/80 px-2.5 py-1 rounded-md text-[11px] font-mono text-slate-300">
             {sourceType.toUpperCase()}
+            {uploadedFileName && ` • ${uploadedFileName}`}
           </div>
         </div>
 
@@ -410,7 +496,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
 
           <div className="flex items-center gap-2 text-xs">
-            {/* Mirror Toggle */}
             <button
               onClick={() => setIsMirrored((m) => !m)}
               className={`flex items-center gap-1 px-2 py-1 rounded-md transition ${
@@ -422,7 +507,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span className="hidden sm:inline">Mirror</span>
             </button>
 
-            {/* Skeleton Overlay Toggle */}
             <button
               onClick={() => setShowSkeleton((s) => !s)}
               className={`flex items-center gap-1 px-2 py-1 rounded-md transition ${
@@ -434,7 +518,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span className="hidden sm:inline">Skeleton</span>
             </button>
 
-            {/* Joint Angles Toggle */}
             <button
               onClick={() => setShowAngles((a) => !a)}
               className={`flex items-center gap-1 px-2 py-1 rounded-md transition ${
@@ -446,7 +529,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span className="hidden sm:inline">Angles</span>
             </button>
 
-            {/* Audio Cue Toggle */}
             <button
               onClick={handleToggleSound}
               className={`p-1.5 rounded-lg transition ${
