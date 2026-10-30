@@ -1,0 +1,124 @@
+{
+  "id": "squat",
+  "name": "Bodyweight Squat",
+  "description": "Evaluates squat depth, knee flexion, hip flexion, and torso verticality throughout the full range of motion.",
+  "primaryAngleId": "knee_angle",
+  "bottomPhaseId": "bottom",
+  "topPhaseId": "standing",
+  "cyclePhases": ["standing", "descending", "bottom", "ascending"],
+  "angles": [
+    {
+      "id": "knee_angle",
+      "name": "Knee Flexion",
+      "description": "Angle formed by hip, knee, and ankle",
+      "type": "joint_3pt",
+      "leftLandmarks": [23, 25, 27],
+      "rightLandmarks": [24, 26, 28],
+      "idealRange": [70, 95],
+      "unit": "°"
+    },
+    {
+      "id": "hip_angle",
+      "name": "Hip Flexion",
+      "description": "Angle formed by shoulder, hip, and knee",
+      "type": "joint_3pt",
+      "leftLandmarks": [11, 23, 25],
+      "rightLandmarks": [12, 24, 26],
+      "idealRange": [60, 95],
+      "unit": "°"
+    },
+    {
+      "id": "torso_inclination",
+      "name": "Torso Lean",
+      "description": "Deviation of torso from vertical",
+      "type": "vertical_inclination",
+      "leftVertical": [11, 23],
+      "rightVertical": [12, 24],
+      "idealRange": [5, 38],
+      "unit": "°"
+    }
+  ],
+  "phases": [
+    {
+      "id": "standing",
+      "name": "Standing Upright",
+      "color": "#10b981",
+      "condition": {
+        "angleId": "knee_angle",
+        "operator": ">=",
+        "threshold": 160
+      }
+    },
+    {
+      "id": "descending",
+      "name": "Descending",
+      "color": "#38bdf8",
+      "condition": {
+        "angleId": "knee_angle",
+        "operator": "<",
+        "threshold": 160
+      }
+    },
+    {
+      "id": "bottom",
+      "name": "Bottom (Inflection)",
+      "color": "#a855f7",
+      "condition": {
+        "angleId": "knee_angle",
+        "operator": "<=",
+        "threshold": 100
+      }
+    },
+    {
+      "id": "ascending",
+      "name": "Ascending",
+      "color": "#f59e0b",
+      "condition": {
+        "angleId": "knee_angle",
+        "operator": ">",
+        "threshold": 100
+      }
+    }
+  ],
+  "rules": [
+    {
+      "id": "squat_depth",
+      "name": "Squat Depth",
+      "message": "Squat deeper: knees should reach ≤ 100° at bottom",
+      "severity": "error",
+      "triggerPhase": "bottom_requirement",
+      "condition": {
+        "angleId": "knee_angle",
+        "operator": "<=",
+        "threshold": 100
+      },
+      "remedy": "Sink hips lower until thighs are parallel or below parallel to ground."
+    },
+    {
+      "id": "torso_forward_lean",
+      "name": "Torso Forward Lean",
+      "message": "Excessive forward lean: keep chest proud and spine neutral",
+      "severity": "warning",
+      "triggerPhase": "all",
+      "condition": {
+        "angleId": "torso_inclination",
+        "operator": ">",
+        "threshold": 42
+      },
+      "remedy": "Brace core and look forward/slightly up to prevent back rounding."
+    },
+    {
+      "id": "hip_fold_excessive",
+      "name": "Excessive Hip Folding",
+      "message": "Hips folding too sharply: sit down rather than bending forward",
+      "severity": "warning",
+      "triggerPhase": "descending",
+      "condition": {
+        "angleId": "hip_angle",
+        "operator": "<",
+        "threshold": 55
+      },
+      "remedy": "Allow knees to track forward naturally while opening the hips."
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "id": "pushup",
+  "name": "Standard Push-up",
+  "description": "Analyzes elbow flexion depth, plank body-line alignment, and core stability through full push-up cadence.",
+  "primaryAngleId": "elbow_angle",
+  "bottomPhaseId": "bottom",
+  "topPhaseId": "plank_up",
+  "cyclePhases": ["plank_up", "descending", "bottom", "ascending"],
+  "angles": [
+    {
+      "id": "elbow_angle",
+      "name": "Elbow Flexion",
+      "description": "Angle formed by shoulder, elbow, and wrist",
+      "type": "joint_3pt",
+      "leftLandmarks": [11, 13, 15],
+      "rightLandmarks": [12, 14, 16],
+      "idealRange": [75, 95],
+      "unit": "°"
+    },
+    {
+      "id": "body_line_angle",
+      "name": "Plank Line",
+      "description": "Alignment of shoulder, hip, and ankle",
+      "type": "joint_3pt",
+      "leftLandmarks": [11, 23, 27],
+      "rightLandmarks": [12, 24, 28],
+      "idealRange": [165, 180],
+      "unit": "°"
+    }
+  ],
+  "phases": [
+    {
+      "id": "plank_up",
+      "name": "Top (Plank)",
+      "color": "#10b981",
+      "condition": {
+        "angleId": "elbow_angle",
+        "operator": ">=",
+        "threshold": 155
+      }
+    },
+    {
+      "id": "descending",
+      "name": "Lowering",
+      "color": "#38bdf8",
+      "condition": {
+        "angleId": "elbow_angle",
+        "operator": "<",
+        "threshold": 155
+      }
+    },
+    {
+      "id": "bottom",
+      "name": "Bottom (Chest Down)",
+      "color": "#a855f7",
+      "condition": {
+        "angleId": "elbow_angle",
+        "operator": "<=",
+        "threshold": 95
+      }
+    },
+    {
+      "id": "ascending",
+      "name": "Pushing Up",
+      "color": "#f59e0b",
+      "condition": {
+        "angleId": "elbow_angle",
+        "operator": ">",
+        "threshold": 95
+      }
+    }
+  ],
+  "rules": [
+    {
+      "id": "pushup_depth",
+      "name": "Push-up Depth",
+      "message": "Lower chest further: elbows should bend to ≤ 95°",
+      "severity": "error",
+      "triggerPhase": "bottom_requirement",
+      "condition": {
+        "angleId": "elbow_angle",
+        "operator": "<=",
+        "threshold": 95
+      },
+      "remedy": "Lower your chest until elbows are at least a 90-degree right angle."
+    },
+    {
+      "id": "hip_sag",
+      "name": "Hip Sagging",
+      "message": "Hips sagging below line: tighten glutes & abs",
+      "severity": "error",
+      "triggerPhase": "all",
+      "condition": {
+        "angleId": "body_line_angle",
+        "operator": "<",
+        "threshold": 160
+      },
+      "remedy": "Squeeze core, glutes, and thighs to form a rigid plank from head to heel."
+    },
+    {
+      "id": "hip_pike",
+      "name": "Hips Piked High",
+      "message": "Hips raised too high: level spine with shoulders",
+      "severity": "warning",
+      "triggerPhase": "all",
+      "condition": {
+        "angleId": "body_line_angle",
+        "operator": "<",
+        "threshold": 150
+      },
+      "remedy": "Bring your pelvis down into a straight horizontal plank."
+    }
+  ]
+}
